@@ -150,6 +150,17 @@ Set to 0 to disable chunked uploading.
 			Advanced: true,
 			Default:  10 * fs.Mebi, // Default NextCloud `max_chunk_size` is `10 MiB`. See https://github.com/nextcloud/server/blob/0447b53bda9fe95ea0cbed765aa332584605d652/apps/files/lib/App.php#L57
 		}, {
+			Name: "nextcloud_chunk_v2",
+			Help: `Nextcloud upload with chunked upload v2 method.
+
+New, more reliable chunked upload method.
+You can enable this if your nextcloud instance is newer than nextcloud-28 has redis or memcache configured.
+https://docs.nextcloud.com/server/latest/developer_manual/client_apis/WebDAV/chunking.html#chunked-upload-v2
+
+`,
+			Advanced: true,
+			Default:  false,
+		}, {
 			Name:     "owncloud_exclude_shares",
 			Help:     "Exclude ownCloud shares",
 			Advanced: true,
@@ -194,6 +205,7 @@ type Options struct {
 	Headers            fs.CommaSepList      `config:"headers"`
 	PacerMinSleep      fs.Duration          `config:"pacer_min_sleep"`
 	ChunkSize          fs.SizeSuffix        `config:"nextcloud_chunk_size"`
+	NxcChunkV2S3       bool                 `config:"nextcloud_chunk_v2"`
 	ExcludeShares      bool                 `config:"owncloud_exclude_shares"`
 	ExcludeMounts      bool                 `config:"owncloud_exclude_mounts"`
 	UnixSocket         string               `config:"unix_socket"`

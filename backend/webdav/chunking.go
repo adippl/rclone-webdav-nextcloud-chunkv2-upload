@@ -22,13 +22,16 @@ import (
 )
 
 func (f *Fs) shouldRetryChunkMerge(ctx context.Context, resp *http.Response, err error, sleepTime *time.Duration, wasLocked *bool) (bool, error) {
-	// Not found. Can be returned by NextCloud when merging chunks of an upload.
-	if resp != nil && resp.StatusCode == 404 {
-		if *wasLocked {
-			// Assume a 404 error after we've received a 423 error is actually a success
-			return false, nil
+	// we don't need this 404 hack on chunkv2 s3 multipart uploads
+	if f.opt.NxcChunkV2S3 == false {
+		// Not found. Can be returned by NextCloud when merging chunks of an upload.
+		if resp != nil && resp.StatusCode == 404 {
+			if *wasLocked {
+				// Assume a 404 error after we've received a 423 error is actually a success
+				return false, nil
+			}
+			return true, err
 		}
-		return true, err
 	}
 
 	// 423 LOCKED
@@ -88,10 +91,18 @@ func (o *Object) updateChunked(ctx context.Context, in0 io.Reader, src fs.Object
 		fs: o.fs,
 	}
 
-	// see https://docs.nextcloud.com/server/24/developer_manual/client_apis/WebDAV/chunking.html#uploading-chunks
-	err = o.uploadChunks(ctx, in0, src.Size(), partObj, uploadDir, options)
-	if err != nil {
-		return err
+	if o.fs.opt.NxcChunkV2S3 {
+		// see https://docs.nextcloud.com/server/24/developer_manual/client_apis/WebDAV/chunking.html#uploading-chunks
+		err = o.uploadChunksNextcloudV2S3(ctx, in0, src.Size(), partObj, uploadDir, options)
+		if err != nil {
+			return err
+		}
+	} else {
+		// see https://docs.nextcloud.com/server/24/developer_manual/client_apis/WebDAV/chunking.html#uploading-chunks
+		err = o.uploadChunks(ctx, in0, src.Size(), partObj, uploadDir, options)
+		if err != nil {
+			return err
+		}
 	}
 
 	// see https://docs.nextcloud.com/server/24/developer_manual/client_apis/WebDAV/chunking.html#assembling-the-chunks
@@ -145,6 +156,60 @@ func (o *Object) uploadChunks(ctx context.Context, in0 io.Reader, size int64, pa
 	return nil
 }
 
+func (o *Object) uploadChunksNextcloudV2S3(ctx context.Context, in0 io.Reader, size int64, partObj *Object, uploadDir string, options []fs.OpenOption) error {
+	chunkSize := int64(partObj.fs.opt.ChunkSize)
+	var chunkNumber uint = 1
+
+	// TODO: upload chunks in parallel for faster transfer speeds
+	for offset := int64(0); offset < size; offset += chunkSize {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		contentLength := chunkSize
+
+		// Last chunk may be smaller
+		if size-offset < contentLength {
+			contentLength = size - offset
+		}
+
+		// chunk upload v2 requires sequential chunk names betweek 1 and 10000
+		// (chunks can be uploaded out of order in the future)
+		// https://github.com/nextcloud/server/pull/27034
+		partObj.remote = fmt.Sprintf("%s/%d", uploadDir, chunkNumber)
+		chunkNumber++
+
+		// Enable low-level HTTP 2 retries.
+		// 2022-04-28 15:59:06 ERROR : stuff/video.avi: Failed to copy: uploading chunk failed: Put "https://censored.com/remote.php/dav/uploads/Admin/rclone-chunked-upload-censored/000006113198080-000006123683840": http2: Transport: cannot retry err [http2: Transport received Server's graceful shutdown GOAWAY] after Request.Body was written; define Request.GetBody to avoid this error
+
+		buf := make([]byte, chunkSize)
+		in := readers.NewRepeatableLimitReaderBuffer(in0, buf, chunkSize)
+
+		getBody := func() (io.ReadCloser, error) {
+			// RepeatableReader{} plays well with accounting so rewinding doesn't make the progress buggy
+			if _, err := in.Seek(0, io.SeekStart); err != nil {
+				return nil, err
+			}
+
+			return io.NopCloser(in), nil
+		}
+		// we need extra header for direct multipart uploads to s3 backend
+		// https://github.com/nextcloud/server/pull/27034
+		// this extra header didn't cause issues in uploads to nextcloud with filesystem backend
+		// it's probably safe to always set in chunk v2 upload scenario
+		nxc_s3_multipart_header := make(map[string]string)
+		nxc_s3_multipart_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
+		nxc_s3_multipart_header["X-S3-Multipart-Destination"] = fmt.Sprintf("files/%s/%s", o.fs.opt.User , o.filePath())
+
+		err := partObj.updateSimple(ctx, in, getBody, partObj.remote, contentLength, "application/x-www-form-urlencoded", nxc_s3_multipart_header , o.fs.chunksUploadURL, options...)
+		if err != nil {
+			return fmt.Errorf("uploading chunk failed: %w", err)
+		}
+	}
+	return nil
+}
+
+
 func (o *Object) createChunksUploadDirectory(ctx context.Context) (string, error) {
 	uploadDir, err := o.getChunksUploadDir()
 	if err != nil {
@@ -161,6 +226,15 @@ func (o *Object) createChunksUploadDirectory(ctx context.Context) (string, error
 		Path:       uploadDir + "/",
 		NoResponse: true,
 		RootURL:    o.fs.chunksUploadURL,
+	}
+	// user different URL for chunkv2 s3 multipart uploads
+	if o.fs.opt.NxcChunkV2S3 {
+		opts.RootURL = o.fs.chunksUploadURL
+		nxc_s3_multipart_header := make(map[string]string)
+		// MKCOL Destination: header has to use normal /dav/files/$USER/ path
+		nxc_s3_multipart_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
+		opts.Path = uploadDir
+		opts.ExtraHeaders = nxc_s3_multipart_header
 	}
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err := o.fs.srv.Call(ctx, &opts)
@@ -183,6 +257,7 @@ func (o *Object) mergeChunks(ctx context.Context, uploadDir string, options []fs
 		Options:    options,
 		RootURL:    o.fs.chunksUploadURL,
 	}
+
 	destinationURL, err := rest.URLJoin(o.fs.endpoint, o.filePath())
 	if err != nil {
 		return fmt.Errorf("finalize chunked upload couldn't join URL: %w", err)
