@@ -22,8 +22,8 @@ import (
 )
 
 func (f *Fs) shouldRetryChunkMerge(ctx context.Context, resp *http.Response, err error, sleepTime *time.Duration, wasLocked *bool) (bool, error) {
-	// we don't need this 404 hack on chunkv2 s3 multipart uploads
-	if f.opt.NxcChunkV2S3 == false {
+	// we don't need this 404 hack on chunkv2 uploads
+	if f.opt.NxcChunkV2 == false {
 		// Not found. Can be returned by NextCloud when merging chunks of an upload.
 		if resp != nil && resp.StatusCode == 404 {
 			if *wasLocked {
@@ -91,9 +91,9 @@ func (o *Object) updateChunked(ctx context.Context, in0 io.Reader, src fs.Object
 		fs: o.fs,
 	}
 
-	if o.fs.opt.NxcChunkV2S3 {
+	if o.fs.opt.NxcChunkV2 {
 		// see https://docs.nextcloud.com/server/24/developer_manual/client_apis/WebDAV/chunking.html#uploading-chunks
-		err = o.uploadChunksNextcloudV2S3(ctx, in0, src.Size(), partObj, uploadDir, options)
+		err = o.uploadChunksNextcloudV2(ctx, in0, src.Size(), partObj, uploadDir, options)
 		if err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func (o *Object) uploadChunks(ctx context.Context, in0 io.Reader, size int64, pa
 	return nil
 }
 
-func (o *Object) uploadChunksNextcloudV2S3(ctx context.Context, in0 io.Reader, size int64, partObj *Object, uploadDir string, options []fs.OpenOption) error {
+func (o *Object) uploadChunksNextcloudV2(ctx context.Context, in0 io.Reader, size int64, partObj *Object, uploadDir string, options []fs.OpenOption) error {
 	chunkSize := int64(partObj.fs.opt.ChunkSize)
 	var chunkNumber uint = 1
 
@@ -193,15 +193,11 @@ func (o *Object) uploadChunksNextcloudV2S3(ctx context.Context, in0 io.Reader, s
 
 			return io.NopCloser(in), nil
 		}
-		// we need extra header for direct multipart uploads to s3 backend
-		// https://github.com/nextcloud/server/pull/27034
-		// this extra header didn't cause issues in uploads to nextcloud with filesystem backend
-		// it's probably safe to always set in chunk v2 upload scenario
-		nxc_s3_multipart_header := make(map[string]string)
-		nxc_s3_multipart_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
-		nxc_s3_multipart_header["X-S3-Multipart-Destination"] = fmt.Sprintf("files/%s/%s", o.fs.opt.User , o.filePath())
+		nxc_chunkv2_header := make(map[string]string)
+		nxc_chunkv2_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
+		nxc_chunkv2_header["OC-Total-Length"] = fmt.Sprintf("%d", o.size)
 
-		err := partObj.updateSimple(ctx, in, getBody, partObj.remote, contentLength, "application/x-www-form-urlencoded", nxc_s3_multipart_header , o.fs.chunksUploadURL, options...)
+		err := partObj.updateSimple(ctx, in, getBody, partObj.remote, contentLength, "application/x-www-form-urlencoded", nxc_chunkv2_header , o.fs.chunksUploadURL, options...)
 		if err != nil {
 			return fmt.Errorf("uploading chunk failed: %w", err)
 		}
@@ -227,14 +223,15 @@ func (o *Object) createChunksUploadDirectory(ctx context.Context) (string, error
 		NoResponse: true,
 		RootURL:    o.fs.chunksUploadURL,
 	}
-	// user different URL for chunkv2 s3 multipart uploads
-	if o.fs.opt.NxcChunkV2S3 {
+	// user different URL for chunkv2 uploads
+	if o.fs.opt.NxcChunkV2 {
 		opts.RootURL = o.fs.chunksUploadURL
-		nxc_s3_multipart_header := make(map[string]string)
+		nxc_chunkv2_header := make(map[string]string)
 		// MKCOL Destination: header has to use normal /dav/files/$USER/ path
-		nxc_s3_multipart_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
+		nxc_chunkv2_header["Destination"] = fmt.Sprintf("%s%s", o.fs.endpointURL, o.filePath())
+		nxc_chunkv2_header["OC-Total-Length"] = fmt.Sprintf("%d", o.size)
 		opts.Path = uploadDir
-		opts.ExtraHeaders = nxc_s3_multipart_header
+		opts.ExtraHeaders = nxc_chunkv2_header
 	}
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err := o.fs.srv.Call(ctx, &opts)

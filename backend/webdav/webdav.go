@@ -154,7 +154,7 @@ Set to 0 to disable chunked uploading.
 			Help: `Nextcloud upload with chunked upload v2 method.
 
 New, more reliable chunked upload method.
-You can enable this if your nextcloud instance is newer than nextcloud-28 has redis or memcache configured.
+You can enable this if your nextcloud instance is newer than nextcloud-28 and has redis or memcache configured.
 https://docs.nextcloud.com/server/latest/developer_manual/client_apis/WebDAV/chunking.html#chunked-upload-v2
 
 `,
@@ -205,7 +205,7 @@ type Options struct {
 	Headers            fs.CommaSepList      `config:"headers"`
 	PacerMinSleep      fs.Duration          `config:"pacer_min_sleep"`
 	ChunkSize          fs.SizeSuffix        `config:"nextcloud_chunk_size"`
-	NxcChunkV2S3       bool                 `config:"nextcloud_chunk_v2"`
+	NxcChunkV2         bool                 `config:"nextcloud_chunk_v2"`
 	ExcludeShares      bool                 `config:"owncloud_exclude_shares"`
 	ExcludeMounts      bool                 `config:"owncloud_exclude_mounts"`
 	UnixSocket         string               `config:"unix_socket"`
